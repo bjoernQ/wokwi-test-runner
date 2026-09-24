@@ -7,7 +7,7 @@ use crate::file_io::SemihostingFiles;
 use crate::gdb::GdbClient;
 use crate::gdb::rsp::StopReply;
 use crate::semihosting::{
-    ElfCache, SemihostingCommand, decode_semihosting, finish_semihosting, handle_errno, handle_time,
+    ElfCache, SemihostingCommand, decode_semihosting, handle_errno, handle_time,
     write_command_line,
 };
 use crate::target::{ArchConfig, Target};
@@ -30,11 +30,10 @@ pub fn run_test(
     if reset_before {
         gdb.reset_halt()?;
     }
-    let mut deadline = Instant::now() + boot_timeout;
+    let mut running_left = boot_timeout;
     let mut cmdline_sent = false;
     let mut files = SemihostingFiles::new();
-    gdb.set_io_timeout(boot_timeout)?;
-    let mut stop = continue_until(gdb, &deadline, timeout)?;
+    let mut stop = continue_until(gdb, &mut running_left, timeout)?;
 
     loop {
         match stop {
@@ -51,10 +50,7 @@ pub fn run_test(
                         Ok(c) => c,
                         Err(e) => {
                             timing!("timing: not semihosting after {}ms: {e}", decode_started.elapsed().as_millis());
-                            if Instant::now() >= deadline {
-                                break;
-                            }
-                            stop = continue_until(gdb, &deadline, timeout)?;
+                            stop = continue_until(gdb, &mut running_left, timeout)?;
                             continue;
                         }
                     }
@@ -70,10 +66,11 @@ pub fn run_test(
                         {
                             let mut target = Target::new(gdb, arch);
                             write_command_line(&mut target, cache, block_address, &cmdline)?;
-                            finish_semihosting(&mut target, &cmd)?;
+                            target.finish_semihosting()?;
                         }
                         cmdline_sent = true;
-                        deadline = Instant::now() + timeout;
+                        // Host time spent answering semihosting is not part of the test timeout.
+                        running_left = timeout;
                     }
                     SemihostingCommand::ExitSuccess if cmdline_sent => return Ok(RunOutcome::Pass),
                     SemihostingCommand::ExitError { .. } if cmdline_sent => return Ok(RunOutcome::Panic),
@@ -81,46 +78,43 @@ pub fn run_test(
                     | SemihostingCommand::Write { .. } | SemihostingCommand::WriteConsole { .. } => {
                         let mut target = Target::new(gdb, arch);
                         files.handle(&mut target, cmd.clone())?;
-                        finish_semihosting(&mut target, &cmd)?;
+                        target.finish_semihosting()?;
                     }
                     SemihostingCommand::Time => {
                         let mut target = Target::new(gdb, arch);
                         handle_time(&mut target)?;
-                        finish_semihosting(&mut target, &cmd)?;
+                        target.finish_semihosting()?;
                     }
                     SemihostingCommand::Errno => {
                         let mut target = Target::new(gdb, arch);
                         handle_errno(&mut target)?;
-                        finish_semihosting(&mut target, &cmd)?;
+                        target.finish_semihosting()?;
                     }
                     SemihostingCommand::Unknown { operation, parameter } => {
                         eprintln!("warning: unhandled semihosting op={operation:#x} param={parameter:#x}");
                         let mut target = Target::new(gdb, arch);
                         target.write_return(-1)?;
-                        finish_semihosting(&mut target, &cmd)?;
+                        target.finish_semihosting()?;
                     }
                     other => bail!("unexpected semihosting {:?} (cmdline_sent={cmdline_sent})", other),
                 }
             }
         }
-        if Instant::now() >= deadline {
-            break;
-        }
-        stop = continue_until(gdb, &deadline, timeout)?;
+        stop = continue_until(gdb, &mut running_left, timeout)?;
     }
-    bail!("test timed out after {:?}", timeout);
 }
 
-fn continue_until(gdb: &mut GdbClient, deadline: &Instant, timeout: Duration) -> Result<StopReply> {
-    let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() {
+fn continue_until(gdb: &mut GdbClient, running_left: &mut Duration, timeout: Duration) -> Result<StopReply> {
+    if running_left.is_zero() {
         bail!("test timed out after {:?}", timeout);
     }
-    gdb.set_io_timeout(left)?;
+    gdb.set_io_timeout(*running_left)?;
     let started = Instant::now();
     match gdb.continue_run() {
         Ok(stop) => {
-            timing!("timing: continue {}ms until halt", started.elapsed().as_millis());
+            let elapsed = started.elapsed();
+            timing!("timing: continue {}ms until halt", elapsed.as_millis());
+            *running_left = running_left.saturating_sub(elapsed);
             Ok(stop)
         }
         Err(err) if is_timeout(&err) => bail!("test timed out after {:?}", timeout),

@@ -252,10 +252,3 @@ pub fn handle_errno(target: &mut Target) -> Result<()> {
     target.write_return(0)?;
     Ok(())
 }
-
-/// Advance PC past the semihosting trap instruction (per RISC-V / Xtensa semihosting specs).
-pub fn finish_semihosting(target: &mut Target, _cmd: &SemihostingCommand) -> Result<()> {
-    let skip = target.arch().regs.trap_skip;
-    target.advance_pc(skip)?;
-    Ok(())
-}

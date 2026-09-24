@@ -35,15 +35,18 @@ impl<'a> Target<'a> {
     }
     pub fn read_mem(&mut self, addr: u64, len: usize) -> Result<Vec<u8>> { self.gdb.read_mem(addr, len) }
     pub fn write_mem(&mut self, addr: u64, data: &[u8]) -> Result<()> { self.gdb.write_mem(addr, data) }
+    /// Stage the syscall return value. `finish_semihosting` sends it with the new PC.
     pub fn write_return(&mut self, value: i32) -> Result<()> {
-        self.gdb.write_reg(self.arch.regs.return_reg, value as u32)
+        self.gdb.stage_reg(self.arch.regs.return_reg, value as u32)
     }
     pub fn read_pc(&mut self) -> Result<u32> { self.gdb.read_pc() }
     pub fn write_pc(&mut self, pc: u32) -> Result<()> {
-        self.gdb.write_reg(self.arch.regs.pc_reg, pc)
+        self.gdb.stage_reg(self.arch.regs.pc_reg, pc)
     }
-    pub fn advance_pc(&mut self, bytes: u32) -> Result<()> {
+    /// Stage PC past the trap and send every staged register in one `G` packet.
+    pub fn finish_semihosting(&mut self) -> Result<()> {
         let pc = self.read_pc()?;
-        self.write_pc(pc + bytes)
+        self.write_pc(pc + self.arch.regs.trap_skip)?;
+        self.gdb.flush_regs()
     }
 }

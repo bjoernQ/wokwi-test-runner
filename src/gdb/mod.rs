@@ -13,9 +13,8 @@ pub struct GdbClient {
     stream: TcpStream,
     layout: RegisterLayout,
     cached_g: Option<String>,
+    regs_dirty: bool,
     thread_selected: bool,
-    vcont: Option<bool>,
-    p_writes: Option<bool>,
 }
 
 impl GdbClient {
@@ -24,18 +23,18 @@ impl GdbClient {
             .with_context(|| format!("failed to connect to GDB server at {addr}"))?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
+        stream.set_nodelay(true)?;
         Ok(Self {
             stream,
             layout,
             cached_g: None,
+            regs_dirty: false,
             thread_selected: false,
-            vcont: None,
-            p_writes: None,
         })
     }
 
     pub fn handshake(&mut self) -> Result<()> {
-        let _ = self.cmd("qSupported:multiprocess+;swbreak+;hwbreak+")?;
+        // Consume the stop reply Wokwi sends on connect. The feature query is unused.
         let _ = self.cmd("?")?;
         self.ensure_thread()?;
         Ok(())
@@ -59,6 +58,7 @@ impl GdbClient {
 
     pub fn invalidate_regs(&mut self) {
         self.cached_g = None;
+        self.regs_dirty = false;
     }
 
     pub fn monitor(&mut self, command: &str) -> Result<String> {
@@ -72,13 +72,11 @@ impl GdbClient {
     }
 
     pub fn continue_run(&mut self) -> Result<StopReply> {
+        self.flush_regs()?;
         self.invalidate_regs();
         self.ensure_thread()?;
-        let reply = if self.supports_vcont()? {
-            self.cmd("vCont;c:0")?
-        } else {
-            self.cmd("c")?
-        };
+        // Wokwi's `vCont?` reply does not offer continue, so `c` is the one packet that resumes.
+        let reply = self.cmd("c")?;
         self.invalidate_regs();
         parse_stop_reply(&reply)
     }
@@ -115,72 +113,54 @@ impl GdbClient {
         self.read_reg_g(reg)
     }
 
-    pub fn write_reg(&mut self, reg: u32, value: u32) -> Result<()> {
+    /// Update a register locally. Call `flush_regs` to send one `G` packet for every staged change.
+    pub fn stage_reg(&mut self, reg: u32, value: u32) -> Result<()> {
         self.ensure_thread()?;
-        if self.p_writes != Some(false) && self.write_reg_p(reg, value).is_ok() {
-            self.p_writes = Some(true);
-            self.invalidate_regs();
+        self.ensure_g()?;
+        let width = self.layout.reg_width_hex();
+        let start = (reg as usize) * width;
+        let hex = encode_reg_value(value);
+        let regs = self.cached_g.as_mut().unwrap();
+        regs.replace_range(start..start + width, &hex);
+        self.regs_dirty = true;
+        Ok(())
+    }
+
+    pub fn flush_regs(&mut self) -> Result<()> {
+        if !self.regs_dirty {
             return Ok(());
         }
-        self.p_writes = Some(false);
-        self.write_reg_g(reg, value)
+        let regs = self.cached_g.clone().unwrap();
+        let reply = self.cmd(&format!("G{regs}"))?;
+        if reply != "OK" {
+            bail!("G write failed: {reply}");
+        }
+        self.regs_dirty = false;
+        Ok(())
+    }
+
+    fn ensure_g(&mut self) -> Result<()> {
+        if self.cached_g.is_some() {
+            return Ok(());
+        }
+        let reply = self.cmd("g")?;
+        let expected = self.layout.g_packet_len();
+        if reply.len() < expected {
+            bail!("g packet too short: got {} expected {}", reply.len(), expected);
+        }
+        self.cached_g = Some(reply);
+        Ok(())
     }
 
     fn read_reg_g(&mut self, reg: u32) -> Result<u32> {
         if reg >= self.layout.reg_count {
             bail!("register {reg} out of range (max {})", self.layout.reg_count - 1);
         }
-        if self.cached_g.is_none() {
-            let reply = self.cmd("g")?;
-            let expected = self.layout.g_packet_len();
-            if reply.len() < expected {
-                bail!("g packet too short: got {} expected {}", reply.len(), expected);
-            }
-            self.cached_g = Some(reply);
-        }
+        self.ensure_g()?;
         let reply = self.cached_g.as_ref().unwrap();
         let width = self.layout.reg_width_hex();
         let start = (reg as usize) * width;
         parse_reg_value(&reply[start..start + width])
-    }
-
-    fn write_reg_p(&mut self, reg: u32, value: u32) -> Result<()> {
-        let reply = self.cmd(&format!("P{reg}={}", encode_reg_value(value)))?;
-        if reply != "OK" {
-            bail!("P{reg} failed: {reply}");
-        }
-        Ok(())
-    }
-
-    fn write_reg_g(&mut self, reg: u32, value: u32) -> Result<()> {
-        if reg >= self.layout.reg_count {
-            bail!("register {reg} out of range (max {})", self.layout.reg_count - 1);
-        }
-        if self.cached_g.is_none() {
-            let reply = self.cmd("g")?;
-            self.cached_g = Some(reply);
-        }
-        let width = self.layout.reg_width_hex();
-        let mut regs = self.cached_g.clone().unwrap();
-        let start = (reg as usize) * width;
-        let hex = encode_reg_value(value);
-        regs.replace_range(start..start + width, &hex);
-        let reply = self.cmd(&format!("G{regs}"))?;
-        if reply != "OK" {
-            bail!("G write failed: {reply}");
-        }
-        self.cached_g = Some(regs);
-        Ok(())
-    }
-
-    fn supports_vcont(&mut self) -> Result<bool> {
-        if let Some(supported) = self.vcont {
-            return Ok(supported);
-        }
-        let reply = self.cmd("vCont?")?;
-        let supported = reply.contains('c');
-        self.vcont = Some(supported);
-        Ok(supported)
     }
 
     fn cmd(&mut self, payload: &str) -> Result<String> {
