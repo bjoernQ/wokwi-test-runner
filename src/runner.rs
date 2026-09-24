@@ -1,12 +1,13 @@
 ﻿use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use crate::timing;
 use crate::elf::{TestCase, TestOutcome};
 use crate::file_io::SemihostingFiles;
 use crate::gdb::GdbClient;
 use crate::gdb::rsp::StopReply;
 use crate::semihosting::{
-    SemihostingCommand, decode_semihosting, finish_semihosting, handle_errno, handle_time,
+    ElfCache, SemihostingCommand, decode_semihosting, finish_semihosting, handle_errno, handle_time,
     write_command_line,
 };
 use crate::target::{ArchConfig, Target};
@@ -20,10 +21,10 @@ pub fn run_test(
     test: &TestCase,
     default_timeout: Duration,
     reset_before: bool,
+    cache: &mut ElfCache,
 ) -> Result<RunOutcome> {
-    // ELF timeouts are target-side budgets. Each semihosting halt is a GDB round-trip,
-    // so the host wait is the CLI timeout (`--timeout-secs`).
-    let timeout = default_timeout;
+    // `timeout` on the test is the suite default, or a per-test override. `--timeout-secs` applies only when neither is set.
+    let timeout = test.timeout.map(|secs| Duration::from_secs(secs as u64)).unwrap_or(default_timeout);
     // Boot and the first SYS_GET_CMDLINE are not part of the test's own timeout.
     let boot_timeout = default_timeout.max(Duration::from_secs(60));
     if reset_before {
@@ -43,12 +44,13 @@ pub fn run_test(
                 continue;
             }
             StopReply::Halted => {
+                let decode_started = Instant::now();
                 let cmd = {
                     let mut target = Target::new(gdb, arch);
-                    match decode_semihosting(&mut target) {
+                    match decode_semihosting(&mut target, cache) {
                         Ok(c) => c,
                         Err(e) => {
-                            eprintln!("debug: {e}");
+                            timing!("timing: not semihosting after {}ms: {e}", decode_started.elapsed().as_millis());
                             if Instant::now() >= deadline {
                                 break;
                             }
@@ -57,6 +59,7 @@ pub fn run_test(
                         }
                     }
                 };
+                timing!("timing: decoded {} in {}ms", cmd.label(), decode_started.elapsed().as_millis());
                 match cmd {
                     SemihostingCommand::GetCommandLine { block_address } if !cmdline_sent => {
                         let cmdline = if let Some(addr) = test.address {
@@ -66,7 +69,7 @@ pub fn run_test(
                         };
                         {
                             let mut target = Target::new(gdb, arch);
-                            write_command_line(&mut target, block_address, &cmdline)?;
+                            write_command_line(&mut target, cache, block_address, &cmdline)?;
                             finish_semihosting(&mut target, &cmd)?;
                         }
                         cmdline_sent = true;
@@ -114,8 +117,12 @@ fn continue_until(gdb: &mut GdbClient, deadline: &Instant, timeout: Duration) ->
         bail!("test timed out after {:?}", timeout);
     }
     gdb.set_io_timeout(left)?;
+    let started = Instant::now();
     match gdb.continue_run() {
-        Ok(stop) => Ok(stop),
+        Ok(stop) => {
+            timing!("timing: continue {}ms until halt", started.elapsed().as_millis());
+            Ok(stop)
+        }
         Err(err) if is_timeout(&err) => bail!("test timed out after {:?}", timeout),
         Err(err) => Err(err),
     }

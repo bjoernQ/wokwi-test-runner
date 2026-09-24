@@ -1,4 +1,6 @@
-﻿use anyhow::{Result, bail};
+﻿use std::collections::{HashMap, HashSet};
+
+use anyhow::{Result, bail};
 use crate::gdb::rsp::is_semihosting_op;
 use crate::target::{Arch, Target};
 
@@ -49,12 +51,36 @@ pub enum SemihostingCommand {
     Unknown { operation: u32, parameter: u32 },
 }
 
-pub fn decode_semihosting(target: &mut Target) -> Result<SemihostingCommand> {
-    let (operation, parameter) = find_semihosting_args(target)?;
+impl SemihostingCommand {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SemihostingCommand::ExitSuccess => "SYS_EXIT ok",
+            SemihostingCommand::ExitError { .. } => "SYS_EXIT error",
+            SemihostingCommand::GetCommandLine { .. } => "SYS_GET_CMDLINE",
+            SemihostingCommand::Open { .. } => "SYS_OPEN",
+            SemihostingCommand::Close { .. } => "SYS_CLOSE",
+            SemihostingCommand::Write { .. } => "SYS_WRITE",
+            SemihostingCommand::WriteConsole { .. } => "SYS_WRITEC/0",
+            SemihostingCommand::Time => "SYS_TIME",
+            SemihostingCommand::Errno => "SYS_ERRNO",
+            SemihostingCommand::Unknown { .. } => "SYS_UNKNOWN",
+        }
+    }
+}
+
+/// Stable for one ELF: trap PCs and the SYS_GET_CMDLINE buffer, which the linker places at fixed addresses.
+#[derive(Default)]
+pub struct ElfCache {
+    traps: HashSet<u32>,
+    cmdline: HashMap<u32, (u32, u32)>,
+}
+
+pub fn decode_semihosting(target: &mut Target, cache: &mut ElfCache) -> Result<SemihostingCommand> {
+    let (operation, parameter) = find_semihosting_args(target, cache)?;
     decode_args(target, operation, parameter)
 }
 
-fn find_semihosting_args(target: &mut Target) -> Result<(u32, u32)> {
+fn find_semihosting_args(target: &mut Target, cache: &mut ElfCache) -> Result<(u32, u32)> {
     let arch = target.arch();
     let operation = target.read_reg_raw(arch.regs.arg0_reg)?;
     let parameter = target.read_reg_raw(arch.regs.arg1_reg)?;
@@ -64,23 +90,33 @@ fn find_semihosting_args(target: &mut Target) -> Result<(u32, u32)> {
             "halt at {pc:#x} is not semihosting (op={operation:#x}, param={parameter:#x})"
         );
     }
-    snap_pc_to_trap(target)?;
+    snap_pc_to_trap(target, cache)?;
     Ok((operation, parameter))
 }
 
 /// If PC is on the hint or the trap, move it onto the trap so `PC += skip` lands past it.
-fn snap_pc_to_trap(target: &mut Target) -> Result<()> {
+fn snap_pc_to_trap(target: &mut Target, cache: &mut ElfCache) -> Result<()> {
     if target.arch().arch != Arch::RiscV32 {
         return Ok(());
     }
     let pc = target.read_pc()?;
+    if cache.traps.contains(&pc) {
+        return Ok(());
+    }
+    if cache.traps.contains(&pc.wrapping_sub(4)) {
+        target.write_pc(pc.wrapping_sub(4))?;
+        return Ok(());
+    }
     for delta in [0i32, -4, 4, -2, 2] {
         let addr = pc.wrapping_add(delta as u32);
         if target.read_u32(addr as u64).ok() == Some(RISCV_EBREAK) {
             let pre = target.read_u32(addr.wrapping_sub(4) as u64).unwrap_or(0);
             let post = target.read_u32(addr.wrapping_add(4) as u64).unwrap_or(0);
-            if pre == RISCV_SEMI_PRE && post == RISCV_SEMI_POST && addr != pc {
-                target.write_pc(addr)?;
+            if pre == RISCV_SEMI_PRE && post == RISCV_SEMI_POST {
+                cache.traps.insert(addr);
+                if addr != pc {
+                    target.write_pc(addr)?;
+                }
             }
             return Ok(());
         }
@@ -181,11 +217,17 @@ fn decode_open_mode(mode: u32) -> OpenMode {
     }
 }
 
-pub fn write_command_line(target: &mut Target, block_address: u32, cmdline: &str) -> Result<()> {
+pub fn write_command_line(target: &mut Target, cache: &mut ElfCache, block_address: u32, cmdline: &str) -> Result<()> {
     let mut buf = cmdline.as_bytes().to_vec();
     buf.push(0);
-    let ptr = target.read_u32(block_address as u64)?;
-    let len = target.read_u32(block_address as u64 + 4)?;
+    let (ptr, len) = if let Some(cached) = cache.cmdline.get(&block_address) {
+        *cached
+    } else {
+        let ptr = target.read_u32(block_address as u64)?;
+        let len = target.read_u32(block_address as u64 + 4)?;
+        cache.cmdline.insert(block_address, (ptr, len));
+        (ptr, len)
+    };
     if buf.len() > len as usize {
         bail!("cmdline buffer too small: need {}, have {}", buf.len(), len);
     }

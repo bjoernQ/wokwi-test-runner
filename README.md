@@ -56,7 +56,8 @@ Wokwi also simulates AVR, STM32, and RP2040. Those are not accepted here. Semiho
 - `--wokwi-cli` (default `wokwi-cli`)
 - `--project-dir` use an existing `wokwi.toml` and `diagram.json`
 - `--list` list tests from the ELF
-- `--timeout-secs` host-side wait for each test (default 60)
+- `--timeout-secs` host-side wait when a test sets no timeout (default 60). A suite `default_timeout` or `#[test(timeout = …)]` is used instead, and starts after `SYS_GET_CMDLINE`.
+- `--timing` print per-packet and per-stage timings on stderr
 
 Without `--project-dir`, the runner writes a temporary project. `firmware` and `elf` in `wokwi.toml` both point at the given ELF.
 

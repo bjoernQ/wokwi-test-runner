@@ -13,6 +13,9 @@ pub struct GdbClient {
     stream: TcpStream,
     layout: RegisterLayout,
     cached_g: Option<String>,
+    thread_selected: bool,
+    vcont: Option<bool>,
+    p_writes: Option<bool>,
 }
 
 impl GdbClient {
@@ -25,14 +28,27 @@ impl GdbClient {
             stream,
             layout,
             cached_g: None,
+            thread_selected: false,
+            vcont: None,
+            p_writes: None,
         })
     }
 
     pub fn handshake(&mut self) -> Result<()> {
         let _ = self.cmd("qSupported:multiprocess+;swbreak+;hwbreak+")?;
         let _ = self.cmd("?")?;
-        // Wokwi reports "multi-threaded target" without thread-id; select hart 0.
+        self.ensure_thread()?;
+        Ok(())
+    }
+
+    fn ensure_thread(&mut self) -> Result<()> {
+        if self.thread_selected {
+            return Ok(());
+        }
+        // Wokwi reports "multi-threaded target" without thread-id; select hart 0 once.
         let _ = self.cmd("Hg0");
+        let _ = self.cmd("Hc0");
+        self.thread_selected = true;
         Ok(())
     }
 
@@ -57,7 +73,7 @@ impl GdbClient {
 
     pub fn continue_run(&mut self) -> Result<StopReply> {
         self.invalidate_regs();
-        let _ = self.cmd("Hc0");
+        self.ensure_thread()?;
         let reply = if self.supports_vcont()? {
             self.cmd("vCont;c:0")?
         } else {
@@ -94,17 +110,19 @@ impl GdbClient {
     }
 
     pub fn read_reg(&mut self, reg: u32) -> Result<u32> {
-        let _ = self.cmd("Hg0");
-        // Wokwi's `p` replies are not reliable; the `g` packet matches the ESP register layout.
+        self.ensure_thread()?;
+        // One `g` packet holds every register. Later reads in this halt reuse it.
         self.read_reg_g(reg)
     }
 
     pub fn write_reg(&mut self, reg: u32, value: u32) -> Result<()> {
-        let _ = self.cmd("Hg0");
-        self.invalidate_regs();
-        if self.write_reg_p(reg, value).is_ok() {
+        self.ensure_thread()?;
+        if self.p_writes != Some(false) && self.write_reg_p(reg, value).is_ok() {
+            self.p_writes = Some(true);
+            self.invalidate_regs();
             return Ok(());
         }
+        self.p_writes = Some(false);
         self.write_reg_g(reg, value)
     }
 
@@ -156,13 +174,25 @@ impl GdbClient {
     }
 
     fn supports_vcont(&mut self) -> Result<bool> {
+        if let Some(supported) = self.vcont {
+            return Ok(supported);
+        }
         let reply = self.cmd("vCont?")?;
-        Ok(reply.contains('c'))
+        let supported = reply.contains('c');
+        self.vcont = Some(supported);
+        Ok(supported)
     }
 
     fn cmd(&mut self, payload: &str) -> Result<String> {
+        let started = std::time::Instant::now();
         self.send_packet(payload)?;
-        self.read_packet()
+        let reply = self.read_packet()?;
+        if crate::trace::enabled() {
+            let ms = started.elapsed().as_millis();
+            let shown: String = payload.chars().take(48).collect();
+            eprintln!("timing: gdb {ms:>5}ms {shown}");
+        }
+        Ok(reply)
     }
 
     fn send_packet(&mut self, payload: &str) -> Result<()> {

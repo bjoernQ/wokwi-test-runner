@@ -14,6 +14,8 @@ pub struct TestCase {
     pub name: String,
     pub expected_outcome: TestOutcome,
     pub ignored: bool,
+    /// Seconds, already resolved from `#[test(timeout = …)]` or the suite `default_timeout`.
+    pub timeout: Option<u32>,
     pub address: Option<u32>,
 }
 
@@ -23,6 +25,8 @@ struct TestDefinition {
     #[serde(rename = "should_panic", deserialize_with = "outcome_from_should_panic")]
     expected_outcome: TestOutcome,
     ignored: bool,
+    #[serde(default)]
+    timeout: Option<u32>,
 }
 
 fn outcome_from_should_panic<'de, D>(deserializer: D) -> Result<TestOutcome, D::Error>
@@ -46,8 +50,9 @@ pub fn parse_elf(path: &Path) -> Result<Option<EmbeddedTestElf>> {
     let version_sym = elf.symbol_by_name("EMBEDDED_TEST_VERSION").context("no EMBEDDED_TEST_VERSION")?;
     let version_bytes = et_section.data_range(version_sym.address(), version_sym.size())?.unwrap();
     let version = u32::from_le_bytes(version_bytes.try_into().expect("version is 4 bytes"));
+    let entry = elf.entry();
     match version {
-        0 => Ok(Some(EmbeddedTestElf { version, tests: vec![] })),
+        0 => Ok(Some(EmbeddedTestElf { version, entry, tests: vec![] })),
         1 => {
             let mut tests = Vec::new();
             for sym in elf.symbols() {
@@ -55,7 +60,7 @@ pub fn parse_elf(path: &Path) -> Result<Option<EmbeddedTestElf>> {
                     tests.push(test);
                 }
             }
-            Ok(Some(EmbeddedTestElf { version, tests }))
+            Ok(Some(EmbeddedTestElf { version, entry, tests }))
         }
         v => Err(anyhow!("unsupported embedded-test protocol version {v}")),
     }
@@ -64,6 +69,7 @@ pub fn parse_elf(path: &Path) -> Result<Option<EmbeddedTestElf>> {
 #[derive(Debug)]
 pub struct EmbeddedTestElf {
     pub version: u32,
+    pub entry: u64,
     pub tests: Vec<TestCase>,
 }
 
@@ -81,6 +87,7 @@ fn decode_testcase_sym(buffer: &[u8], elf: &object::File, sym: &Symbol, et_secti
         name: format!("{mod_path}::{}", def.name),
         expected_outcome: def.expected_outcome,
         ignored: def.ignored,
+        timeout: def.timeout,
         address: Some(test_fn_ptr),
     }))
 }
