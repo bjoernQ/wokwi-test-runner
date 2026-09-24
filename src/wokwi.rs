@@ -1,5 +1,4 @@
-﻿use std::io::Read;
-use std::path::Path;
+﻿use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -13,11 +12,9 @@ impl WokwiSession {
         let elf = elf.canonicalize().with_context(|| format!("ELF not found: {}", elf.display()))?;
         let mut cmd = Command::new(wokwi_cli);
         cmd.arg(project_dir).arg("--elf").arg(&elf).arg("--gdb-server-port").arg(gdb_port.to_string()).arg("--timeout").arg("0").arg("--quiet");
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().with_context(|| format!("failed to spawn {wokwi_cli}"))?;
-        // Drain both pipes. Leaving them unread fills the buffer and stalls the simulator.
-        drain(child.stdout.take());
-        drain(child.stderr.take());
+        // Discard simulator logs. An unread pipe fills up and stalls wokwi-cli; null never blocks.
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        let child = cmd.spawn().with_context(|| format!("failed to spawn {wokwi_cli}"))?;
         Ok(Self { child })
     }
 
@@ -29,13 +26,5 @@ impl WokwiSession {
 
 impl Drop for WokwiSession {
     fn drop(&mut self) { self.stop(); }
-}
-
-fn drain(pipe: Option<impl Read + Send + 'static>) {
-    let Some(mut pipe) = pipe else { return };
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while pipe.read(&mut buf).ok().is_some_and(|n| n > 0) {}
-    });
 }
 

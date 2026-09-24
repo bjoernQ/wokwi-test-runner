@@ -281,11 +281,10 @@ fn parse_reg_value(hex: &str) -> Result<u32> {
 pub fn wait_for_port(addr: SocketAddr, timeout: Duration) -> Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-            std::thread::sleep(Duration::from_millis(500));
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     bail!("timed out waiting for GDB server at {addr}");
 }
