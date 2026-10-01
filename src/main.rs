@@ -1,6 +1,6 @@
 ﻿use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -18,6 +18,7 @@ mod wokwi;
 
 use chip::{arch_config, ensure_wokwi_token, lookup};
 use elf::parse_elf;
+use gdb::regs::RegisterLayout;
 use gdb::{GdbClient, wait_for_port};
 use runner::{check_outcome, run_test};
 use semihosting::ElfCache;
@@ -70,6 +71,8 @@ fn main() -> Result<()> {
     eprintln!("\nrunning {runnable} tests\n");
     let mut failed = 0usize;
     let mut elf_cache = ElfCache::default();
+    // A fresh simulation is already at reset; later tests reuse it via `monitor reset halt`.
+    let mut sim: Option<(WokwiSession, GdbClient)> = None;
     for test in &embedded.tests {
         if test.ignored {
             println!("test {} ... ignored", test.name);
@@ -78,25 +81,24 @@ fn main() -> Result<()> {
         print!("test {} ... ", test.name);
         let _ = std::io::stdout().flush();
         let test_started = std::time::Instant::now();
-        // Wokwi has no working monitor-reset, so each test gets a fresh simulation.
-        let mut session = WokwiSession::start(&project_dir, &args.elf, args.gdb_port, &args.wokwi_cli)?;
-        timing!("timing: spawn {}ms", test_started.elapsed().as_millis());
         let result = (|| {
+            let reset_before = sim.is_some();
+            if sim.is_none() {
+                sim = Some(start_simulation(&args, &project_dir, addr, arch.regs)?);
+            }
+            let (_, gdb) = sim.as_mut().unwrap();
             let started = std::time::Instant::now();
-            wait_for_port(addr, Duration::from_secs(60))?;
-            timing!("timing: gdb port {}ms", started.elapsed().as_millis());
-            let started = std::time::Instant::now();
-            let mut gdb = GdbClient::connect(addr, Duration::from_secs(120), arch.regs)?;
-            gdb.handshake()?;
-            timing!("timing: handshake {}ms", started.elapsed().as_millis());
-            let started = std::time::Instant::now();
-            let outcome = run_test(&mut gdb, arch, test, default_timeout, false, &mut elf_cache);
+            let outcome = run_test(gdb, arch, test, default_timeout, reset_before, &mut elf_cache);
             timing!("timing: run_test {}ms", started.elapsed().as_millis());
             outcome
         })();
-        let started = std::time::Instant::now();
-        session.stop();
-        timing!("timing: stop {}ms  total {}ms", started.elapsed().as_millis(), test_started.elapsed().as_millis());
+        if result.is_err() {
+            // The target may still be running or the GDB stream out of sync; start over for the next test.
+            if let Some((mut session, _)) = sim.take() {
+                session.stop();
+            }
+        }
+        timing!("timing: total {}ms", test_started.elapsed().as_millis());
         match result {
             Ok(outcome) => match check_outcome(test, outcome) {
                 Ok(()) => println!("ok"),
@@ -105,9 +107,26 @@ fn main() -> Result<()> {
             Err(e) => { println!("FAILED"); eprintln!("  {e}"); failed += 1; }
         }
     }
+    // `process::exit` skips destructors, so stop the simulator explicitly.
+    drop(sim);
     eprintln!("\ntest result: {}. {} passed; {} failed; 0 ignored\n", if failed == 0 { "ok" } else { "FAILED" }, runnable - failed, failed);
     if failed > 0 { std::process::exit(1); }
     Ok(())
+}
+
+fn start_simulation(args: &Args, project_dir: &Path, addr: SocketAddr, regs: RegisterLayout) -> Result<(WokwiSession, GdbClient)> {
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+        bail!("GDB port {addr} is already in use; is another wokwi-cli still running?");
+    }
+    let started = std::time::Instant::now();
+    let session = WokwiSession::start(project_dir, &args.elf, args.gdb_port, &args.wokwi_cli)?;
+    wait_for_port(addr, Duration::from_secs(60))?;
+    timing!("timing: gdb port {}ms", started.elapsed().as_millis());
+    let started = std::time::Instant::now();
+    let mut gdb = GdbClient::connect(addr, Duration::from_secs(120), regs)?;
+    gdb.handshake()?;
+    timing!("timing: handshake {}ms", started.elapsed().as_millis());
+    Ok((session, gdb))
 }
 
 fn prepare_project_dir(args: &Args, board: &str) -> Result<PathBuf> {

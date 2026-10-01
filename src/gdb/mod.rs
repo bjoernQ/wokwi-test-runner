@@ -63,11 +63,20 @@ impl GdbClient {
 
     pub fn monitor(&mut self, command: &str) -> Result<String> {
         let hex_cmd = command.bytes().map(|b| format!("{:02x}", b)).collect::<String>();
-        self.cmd(&format!("qRcmd,{hex_cmd}"))
+        let mut reply = self.cmd(&format!("qRcmd,{hex_cmd}"))?;
+        // Console output arrives as `O<hex>` packets before the final reply.
+        while reply.len() > 1 && reply.starts_with('O') && reply != "OK" {
+            reply = self.read_packet()?;
+        }
+        Ok(reply)
     }
 
     pub fn reset_halt(&mut self) -> Result<()> {
-        let _ = self.monitor("reset halt");
+        let reply = self.monitor("reset halt")?;
+        self.invalidate_regs();
+        if reply.is_empty() || reply.starts_with('E') {
+            bail!("monitor reset halt failed: {reply:?}");
+        }
         Ok(())
     }
 
