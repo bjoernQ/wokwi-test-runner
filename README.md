@@ -58,8 +58,24 @@ Wokwi also simulates AVR, STM32, and RP2040. Those are not accepted here. Semiho
 - `--list` list tests from the ELF
 - `--timeout-secs` wait for the target when a test sets no timeout (default 60). A suite `default_timeout` or `#[test(timeout = …)]` is used instead. It starts after `SYS_GET_CMDLINE` and counts time the target is running, not time spent answering semihosting.
 - `--timing` print per-packet and per-stage timings on stderr
+- `--part ID=TYPE[,KEY=VALUE...]` add a part to the generated diagram (repeatable)
+- `--connect PIN=PIN[=PIN...]` wire pins together in the generated diagram (repeatable)
+- `--show-diagram` print the generated `diagram.json` on stderr
 
 Without `--project-dir`, the runner writes a temporary project. `firmware` and `elf` in `wokwi.toml` both point at the given ELF.
+
+## Extra hardware
+
+`--part` and `--connect` extend the generated `diagram.json`. They cannot be combined with `--project-dir`.
+
+The board's part ID is `esp`. A pin without an `ID:` prefix is a board pin, so `2=3` shorts GPIO2 and GPIO3. A chain such as `2=3=4` adds one wire per neighbouring pair. Part types, pin names and attributes are the ones in the [Wokwi part reference](https://docs.wokwi.com/getting-started/supported-hardware), for example `board-bmp180` or `wokwi-dht22`. Attribute values are passed through as strings.
+
+```powershell
+wokwi-test-runner esp32c6 path\to\test.elf `
+  --connect 2=3 --connect 22=23 `
+  --part bmp=board-bmp180 `
+  --connect bmp:VCC=3V3 --connect bmp:GND=GND.1 --connect bmp:SDA=6 --connect bmp:SCL=7
+```
 
 ## How it works
 

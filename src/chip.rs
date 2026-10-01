@@ -29,10 +29,6 @@ pub fn arch_config(spec: ChipSpec) -> ArchConfig {
     match spec.arch { Arch::RiscV32 => ArchConfig::riscv32(), Arch::Xtensa => ArchConfig::xtensa() }
 }
 
-pub fn diagram_json(board: &str) -> String {
-    format!(r#"{{"version":1,"author":"wokwi-test-runner","editor":"wokwi","parts":[{{"type":"{board}","id":"esp","attrs":{{}}}}],"connections":[["esp:TX","$serialMonitor:RX",""],["esp:RX","$serialMonitor:TX",""]]}}"#)
-}
-
 pub fn wokwi_toml(gdb_port: u16, elf: &std::path::Path) -> String {
     let elf = elf.to_string_lossy().replace('\\', "/");
     format!("[wokwi]\nversion = 1\nfirmware = \"{elf}\"\nelf = \"{elf}\"\ngdbServerPort = {gdb_port}\n")

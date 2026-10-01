@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 mod chip;
+mod diagram;
 mod elf;
 mod file_io;
 mod gdb;
@@ -35,6 +36,15 @@ struct Args {
     wokwi_cli: String,
     #[arg(long)]
     project_dir: Option<PathBuf>,
+    /// Add a part to the generated diagram: ID=TYPE[,KEY=VALUE...], e.g. `bmp=board-bmp180`.
+    #[arg(long = "part", value_name = "ID=TYPE[,KEY=VALUE...]", value_parser = diagram::parse_part)]
+    parts: Vec<diagram::Part>,
+    /// Wire pins together: PIN=PIN[=PIN...]. Pins without `ID:` are board pins, e.g. `2=3` or `bmp:SDA=6`.
+    #[arg(long = "connect", value_name = "PIN=PIN[=PIN...]", value_parser = diagram::parse_connection)]
+    connections: Vec<Vec<String>>,
+    /// Print the generated diagram.json to stderr.
+    #[arg(long)]
+    show_diagram: bool,
     #[arg(long)]
     list: bool,
     #[arg(long, default_value = "60")]
@@ -131,12 +141,19 @@ fn start_simulation(args: &Args, project_dir: &Path, addr: SocketAddr, regs: Reg
 
 fn prepare_project_dir(args: &Args, board: &str) -> Result<PathBuf> {
     if let Some(dir) = &args.project_dir {
+        if !args.parts.is_empty() || !args.connections.is_empty() {
+            bail!("--part and --connect only apply to the generated diagram, not to --project-dir");
+        }
         return Ok(dir.clone());
+    }
+    let diagram = diagram::diagram_json(board, &args.parts, &args.connections)?;
+    if args.show_diagram {
+        eprintln!("{diagram}");
     }
     let dir = tempfile::tempdir()?;
     let elf = args.elf.canonicalize().with_context(|| format!("ELF not found: {}", args.elf.display()))?;
     std::fs::write(dir.path().join("wokwi.toml"), chip::wokwi_toml(args.gdb_port, &elf))?;
-    std::fs::write(dir.path().join("diagram.json"), chip::diagram_json(board))?;
+    std::fs::write(dir.path().join("diagram.json"), diagram)?;
     Ok(dir.keep())
 }
 
