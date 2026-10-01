@@ -2,6 +2,7 @@
 
 use anyhow::{Result, bail};
 use crate::gdb::rsp::is_semihosting_op;
+use crate::timing;
 use crate::target::{Arch, Target};
 
 const RISCV_EBREAK: u32 = 0x0010_0073;
@@ -75,23 +76,25 @@ pub struct ElfCache {
     cmdline: HashMap<u32, (u32, u32)>,
 }
 
-pub fn decode_semihosting(target: &mut Target, cache: &mut ElfCache) -> Result<SemihostingCommand> {
-    let (operation, parameter) = find_semihosting_args(target, cache)?;
-    decode_args(target, operation, parameter)
+/// `Ok(None)` when the halt is not a semihosting call.
+pub fn decode_semihosting(target: &mut Target, cache: &mut ElfCache) -> Result<Option<SemihostingCommand>> {
+    let Some((operation, parameter)) = find_semihosting_args(target, cache)? else {
+        return Ok(None);
+    };
+    decode_args(target, operation, parameter).map(Some)
 }
 
-fn find_semihosting_args(target: &mut Target, cache: &mut ElfCache) -> Result<(u32, u32)> {
+fn find_semihosting_args(target: &mut Target, cache: &mut ElfCache) -> Result<Option<(u32, u32)>> {
     let arch = target.arch();
-    let operation = target.read_reg_raw(arch.regs.arg0_reg)?;
-    let parameter = target.read_reg_raw(arch.regs.arg1_reg)?;
+    let operation = target.read_arg_reg(arch.regs.arg0_reg)?;
+    let parameter = target.read_arg_reg(arch.regs.arg1_reg)?;
     if !is_semihosting_op(operation) {
-        let pc = target.read_pc().unwrap_or(0);
-        bail!(
-            "halt at {pc:#x} is not semihosting (op={operation:#x}, param={parameter:#x})"
-        );
+        let pc = target.read_pc()?;
+        timing!("timing: halt at {pc:#x} is not semihosting (op={operation:#x}, param={parameter:#x})");
+        return Ok(None);
     }
     snap_pc_to_trap(target, cache)?;
-    Ok((operation, parameter))
+    Ok(Some((operation, parameter)))
 }
 
 /// If PC is on the hint or the trap, move it onto the trap so `PC += skip` lands past it.

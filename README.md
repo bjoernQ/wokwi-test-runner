@@ -48,7 +48,7 @@ The chip argument selects two things: the dev board placed in a generated `diagr
 
 Wokwi also simulates AVR, STM32, and RP2040. Those are not accepted here. Semihosting needs a per-architecture GDB register map and calling convention, and this runner only implements the ESP RISC-V and ESP Xtensa layouts from [esp-serial-dbg](https://github.com/esp-rs/esp-serial-dbg/tree/main/espdbg/src/gdb).
 
-`esp32c6` is the chip exercised end to end. The others use the same two layouts, but have not been run here. ESP32-C5 and ESP32-S31 are alpha in Wokwi, and ESP32-P4 is beta.
+`esp32c3`, `esp32c6`, `esp32p4`, `esp32`, `esp32s2` and `esp32s3` have been run end to end. Each Xtensa chip has its own GDB register layout. The remaining RISC-V chips reuse the same RISC-V layout, but have not been run here. ESP32-C5 and ESP32-S31 are alpha in Wokwi, and ESP32-P4 is beta.
 
 ## Options
 

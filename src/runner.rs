@@ -46,10 +46,9 @@ pub fn run_test(
                 let decode_started = Instant::now();
                 let cmd = {
                     let mut target = Target::new(gdb, arch);
-                    match decode_semihosting(&mut target, cache) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            timing!("timing: not semihosting after {}ms: {e}", decode_started.elapsed().as_millis());
+                    match decode_semihosting(&mut target, cache)? {
+                        Some(c) => c,
+                        None => {
                             stop = continue_until(gdb, &mut running_left, timeout)?;
                             continue;
                         }
