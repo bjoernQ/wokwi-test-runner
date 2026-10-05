@@ -61,6 +61,13 @@ Wokwi also simulates AVR, STM32, and RP2040. Those are not accepted here. Semiho
 - `--part ID=TYPE[,KEY=VALUE...]` add a part to the generated diagram (repeatable)
 - `--connect PIN=PIN[=PIN...]` wire pins together in the generated diagram (repeatable)
 - `--show-diagram` print the generated `diagram.json` on stderr
+- `--coverage-file PATH` write instruction coverage for the whole run (see below)
+
+## Coverage
+
+`--coverage-file` passes `--coverage-file` to `wokwi-cli`. The result is a `wokwi-coverage` JSON file with a `[pc, hits, taken]` triple for every executed address. Map the addresses to source lines with the symbols in the ELF. This needs `wokwi-cli` 0.28 or newer and a simulation server that supports coverage. Otherwise the runner prints a warning and writes no file.
+
+`wokwi-cli` writes the file only when it shuts down cleanly. With this option the runner stops it with Ctrl+Break on Windows or SIGTERM elsewhere instead of killing it, and waits up to 30 seconds. After a failed test the runner starts a new simulation, so a run can produce several files. They are merged into one: hit and taken counts are summed per address, `nanos` is summed, and `stats` is recomputed without `pages`.
 
 Without `--project-dir`, the runner writes a temporary project. `firmware` and `elf` in `wokwi.toml` both point at the given ELF.
 
