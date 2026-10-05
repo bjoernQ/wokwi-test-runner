@@ -62,14 +62,56 @@ Wokwi also simulates AVR, STM32, and RP2040. Those are not accepted here. Semiho
 - `--connect PIN=PIN[=PIN...]` wire pins together in the generated diagram (repeatable)
 - `--show-diagram` print the generated `diagram.json` on stderr
 - `--coverage-file PATH` write instruction coverage for the whole run (see below)
+- `--lcov-file PATH` write line coverage as an LCOV tracefile for grcov (see below)
+
+Without `--project-dir`, the runner writes a temporary project. `firmware` and `elf` in `wokwi.toml` both point at the given ELF.
 
 ## Coverage
 
-`--coverage-file` passes `--coverage-file` to `wokwi-cli`. The result is a `wokwi-coverage` JSON file with a `[pc, hits, taken]` triple for every executed address. Map the addresses to source lines with the symbols in the ELF. This needs `wokwi-cli` 0.28 or newer and a simulation server that supports coverage. Otherwise the runner prints a warning and writes no file.
+`--coverage-file` writes a `wokwi-coverage` JSON file with a `[pc, hits, taken]` triple for every executed address. `--lcov-file` maps those addresses to source lines through the DWARF line tables of the ELF and writes an LCOV tracefile. Every line with code in an executable section is listed, so lines that never ran count as missed. A line's count is the highest count of its instructions. Branch data is not included. The two options can be used together or on their own.
 
-`wokwi-cli` writes the file only when it shuts down cleanly. With this option the runner stops it with Ctrl+Break on Windows or SIGTERM elsewhere instead of killing it, and waits up to 30 seconds. After a failed test the runner starts a new simulation, so a run can produce several files. They are merged into one: hit and taken counts are summed per address, `nanos` is summed, and `stats` is recomputed without `pages`.
+Coverage needs `wokwi-cli` 0.28 or newer and a simulation server that supports it. Otherwise the runner prints a warning and writes no file. `--lcov-file` also needs debug info in the ELF; the esp-hal HIL tests build release with `debug = 0`, so set `CARGO_PROFILE_RELEASE_DEBUG=2`.
 
-Without `--project-dir`, the runner writes a temporary project. `firmware` and `elf` in `wokwi.toml` both point at the given ELF.
+Wokwi clears coverage on reset, so with coverage enabled every test runs in its own simulation instead of reusing one via `monitor reset halt`. This makes the run slower. The per-simulation files are merged: hit and taken counts are summed per address, `nanos` is summed, and `stats` is recomputed without `pages`.
+
+`wokwi-cli` writes its coverage only when it shuts down cleanly, so the runner stops it with Ctrl+Break on Windows or SIGTERM elsewhere instead of killing it, and waits up to 30 seconds.
+
+### Coverage report with grcov
+
+This example covers the esp-hal HIL tests on an ESP32-C6. Run it from the esp-hal checkout.
+
+1. Build the test binaries with debug info. The HIL test release profile has `debug = 0`:
+
+   ```powershell
+   $env:CARGO_PROFILE_RELEASE_DEBUG = "2"
+   cd hil-test
+   cargo build --release --features esp32c6,unstable,embassy --target riscv32imac-unknown-none-elf --bin gpio --bin interrupt
+   cd ..
+   ```
+
+2. Run each binary with its own `--lcov-file`, all into one directory:
+
+   ```powershell
+   $bins = "target\riscv32imac-unknown-none-elf\release"
+   mkdir coverage
+   wokwi-test-runner --lcov-file coverage\gpio.info --connect 2=3 esp32c6 $bins\gpio
+   wokwi-test-runner --lcov-file coverage\interrupt.info esp32c6 $bins\interrupt
+   ```
+
+3. Turn the directory into a report. grcov reads every `.info` file in it and adds up the counts:
+
+   ```powershell
+   grcov coverage -s . --ignore-not-existing --keep-only "esp-hal/src/**" -t html -o coverage-html
+   ```
+
+   `coverage-html\index.html` is the report. With `-t markdown` grcov prints a per-file table and the total instead. With `-t lcov -o lcov.info` it writes a single combined tracefile for Codecov or `genhtml`.
+
+Things to get right:
+
+- `-s` is the source root. grcov shortens paths under it to relative ones, which `--keep-only` patterns and the HTML report use.
+- Use `--keep-only` (or `--ignore`) to drop the paths outside `-s`, such as crates.io dependencies in the cargo registry and the standard library under `/rustc/...`. On Windows, grcov's `covdir` output panics on those absolute drive paths. `--ignore-not-existing` drops source files that aren't on disk.
+- grcov picks the input format from the file extension: `.info` is LCOV. It also tries to parse `.json` files, so don't put `--coverage-file` output in the directory you pass to grcov.
+- Each test binary needs its own `--lcov-file`. Reusing one path overwrites the earlier binaries' coverage.
 
 ## Extra hardware
 

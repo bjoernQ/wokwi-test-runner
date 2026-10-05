@@ -12,6 +12,7 @@ mod diagram;
 mod elf;
 mod file_io;
 mod gdb;
+mod lcov;
 mod runner;
 mod semihosting;
 mod target;
@@ -56,6 +57,9 @@ struct Args {
     /// Write instruction coverage of the whole run (wokwi-coverage JSON) to this file.
     #[arg(long, value_name = "PATH")]
     coverage_file: Option<PathBuf>,
+    /// Write per-line coverage as an LCOV tracefile (for grcov, genhtml, Codecov). Needs DWARF line info in the ELF.
+    #[arg(long, value_name = "PATH")]
+    lcov_file: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -85,8 +89,10 @@ fn main() -> Result<()> {
     eprintln!("\nrunning {runnable} tests\n");
     let mut failed = 0usize;
     let mut elf_cache = ElfCache::default();
+    // Wokwi clears coverage on `monitor reset halt`, so with coverage every test gets its own simulation.
     // Each simulation writes its own coverage file; they are merged once all tests ran.
-    let coverage_dir = args.coverage_file.as_ref().map(|_| tempfile::tempdir()).transpose()?;
+    let collect_coverage = args.coverage_file.is_some() || args.lcov_file.is_some();
+    let coverage_dir = collect_coverage.then(tempfile::tempdir).transpose()?;
     let mut coverage_parts: Vec<PathBuf> = Vec::new();
     // A fresh simulation is already at reset; later tests reuse it via `monitor reset halt`.
     let mut sim: Option<(WokwiSession, GdbClient)> = None;
@@ -111,8 +117,8 @@ fn main() -> Result<()> {
             timing!("timing: run_test {}ms", started.elapsed().as_millis());
             outcome
         })();
-        if result.is_err() {
-            // The target may still be running or the GDB stream out of sync; start over for the next test.
+        if result.is_err() || collect_coverage {
+            // After an error the target may still be running or the GDB stream out of sync; start over for the next test.
             if let Some((mut session, _)) = sim.take() {
                 session.stop();
             }
@@ -129,8 +135,15 @@ fn main() -> Result<()> {
     // `process::exit` skips destructors, so stop the simulator explicitly.
     drop(sim);
     eprintln!("\ntest result: {}. {} passed; {} failed; 0 ignored\n", if failed == 0 { "ok" } else { "FAILED" }, runnable - failed, failed);
-    if let Some(out) = &args.coverage_file {
-        coverage::merge(&coverage_parts, out)?;
+    if collect_coverage {
+        if let Some(report) = coverage::merge(&coverage_parts)? {
+            if let Some(out) = &args.coverage_file {
+                coverage::write_json(&report, out)?;
+            }
+            if let Some(out) = &args.lcov_file {
+                lcov::write(&args.elf, &report, out)?;
+            }
+        }
     }
     if failed > 0 { std::process::exit(1); }
     Ok(())
