@@ -155,10 +155,10 @@ fn start_simulation(args: &Args, project_dir: &Path, addr: SocketAddr, regs: Reg
     }
     let started = std::time::Instant::now();
     let session = WokwiSession::start(project_dir, &args.elf, args.gdb_port, &args.wokwi_cli, coverage_file)?;
-    wait_for_port(addr, Duration::from_secs(60))?;
+    let stream = wait_for_port(addr, Duration::from_secs(60))?;
     timing!("timing: gdb port {}ms", started.elapsed().as_millis());
     let started = std::time::Instant::now();
-    let mut gdb = GdbClient::connect(addr, Duration::from_secs(120), regs)?;
+    let mut gdb = GdbClient::connect(stream, Duration::from_secs(120), regs)?;
     gdb.handshake()?;
     timing!("timing: handshake {}ms", started.elapsed().as_millis());
     Ok((session, gdb))

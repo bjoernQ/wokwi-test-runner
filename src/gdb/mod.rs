@@ -18,9 +18,7 @@ pub struct GdbClient {
 }
 
 impl GdbClient {
-    pub fn connect(addr: SocketAddr, timeout: Duration, layout: RegisterLayout) -> Result<Self> {
-        let stream = TcpStream::connect_timeout(&addr, timeout)
-            .with_context(|| format!("failed to connect to GDB server at {addr}"))?;
+    pub fn connect(stream: TcpStream, timeout: Duration, layout: RegisterLayout) -> Result<Self> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         stream.set_nodelay(true)?;
@@ -267,11 +265,11 @@ fn parse_reg_value(hex: &str) -> Result<u32> {
     Ok(u32::from_le_bytes(arr))
 }
 
-pub fn wait_for_port(addr: SocketAddr, timeout: Duration) -> Result<()> {
+pub fn wait_for_port(addr: SocketAddr, timeout: Duration) -> Result<TcpStream> {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-            return Ok(());
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+            return Ok(stream);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
